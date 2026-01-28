@@ -7,9 +7,8 @@ import subprocess
 import edge_tts
 from deep_translator import GoogleTranslator
 
-# Configuration - YouTube RTMP Stream
+# Configuration - Stream to YouTube RTMP servers
 YOUTUBE_URL = "rtmp://a.rtmp.youtube.com/live2/"
-# Set this secret in your GitHub Repository Settings
 STREAM_KEY = os.getenv("YOUTUBE_STREAM_KEY")
 
 RSS_FEEDS = [
@@ -18,15 +17,14 @@ RSS_FEEDS = [
 ]
 
 def get_news():
-    """Fetches the latest news and images from RSS feeds."""
-    print("\n--- [1/4] Fetching Fresh News ---")
+    """Scrapes RSS feeds for the latest news stories and images."""
+    print("\n--- [1/4] Fetching Latest News ---")
     articles = []
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:6]:
+            for entry in feed.entries[:6]: 
                 img_url = None
-                # Extract image URL from entry
                 if 'media_content' in entry:
                     img_url = entry.media_content[0]['url']
                 elif 'links' in entry:
@@ -38,40 +36,63 @@ def get_news():
                     img_url = f"https://picsum.photos/1920/1080?random={time.time()}"
 
                 articles.append({
-                    "title": entry.title,
-                    "summary": entry.summary,
+                    "title": entry.title or "Habari Mpya",
+                    "summary": entry.summary or entry.title or "Maelezo hayapatikani kwa sasa.",
                     "image": img_url
                 })
         except Exception as e:
             print(f"Feed error: {e}")
     return articles
 
+async def generate_audio_with_retry(text, voice, outfile, retries=3):
+    """Generates audio with a retry mechanism for robustness."""
+    for i in range(retries):
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(outfile)
+            if os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+                return True
+        except Exception as e:
+            print(f"TTS Attempt {i+1} failed: {e}")
+            await asyncio.sleep(2)
+    return False
+
 async def generate_assets(news_item, index):
-    """Translates content, generates high-quality neural voiceover, and renders video."""
+    """Translates content, generates neural voice, and renders 1080p video."""
     try:
         # 1. Translation
         print(f"Segment {index}: Translating...")
-        translated = GoogleTranslator(source='auto', target='sw').translate(news_item['summary'])
-        script = " ".join(translated.split()[:75]) + "."
+        translator = GoogleTranslator(source='auto', target='sw')
+        translated = translator.translate(news_item['summary'])
+        
+        if not translated or len(translated.strip()) < 5:
+            translated = news_item['title'] # Fallback to title if summary fails
 
-        # 2. Neural TTS (High Quality Microsoft Voice - FREE)
-        print(f"Segment {index}: Generating Neural Audio...")
-        voice = "sw-TZ-LughaNeural" # Professional Tanzanian Swahili
+        script = " ".join(translated.split()[:80]) + "."
+
+        # 2. High Quality Microsoft Neural TTS
+        print(f"Segment {index}: Generating Audio...")
+        # primary voice: sw-TZ-LughaNeural, fallback: sw-KE-ZuriNeural
         audio_file = f"audio_{index}.mp3"
-        communicate = edge_tts.Communicate(script, voice)
-        await communicate.save(audio_file)
+        success = await generate_audio_with_retry(script, "sw-TZ-LughaNeural", audio_file)
+        
+        if not success:
+            print(f"Segment {index}: Trying fallback voice...")
+            success = await generate_audio_with_retry(script, "sw-KE-ZuriNeural", audio_file)
 
-        # 3. Image Download
+        if not success:
+            raise Exception("Failed to generate audio after multiple attempts.")
+
+        # 3. Download Image
         img_file = f"image_{index}.jpg"
         img_res = requests.get(news_item['image'], timeout=15)
         with open(img_file, 'wb') as f:
             f.write(img_res.content)
 
-        # 4. Professional 1080p Video Rendering
+        # 4. Rendering Video
         output_video = f"segment_{index}.mp4"
-        print(f"Segment {index}: Rendering Cinematic Video...")
+        print(f"Segment {index}: Rendering Video...")
         
-        # Get audio duration
         duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
         duration = subprocess.check_output(duration_cmd).decode('utf-8').strip()
 
@@ -88,9 +109,9 @@ async def generate_assets(news_item, index):
         print(f"Error in segment {index}: {e}")
         return None
 
-async def main_loop():
+async def broadcast_loop():
     if not STREAM_KEY:
-        print("CRITICAL: YOUTUBE_STREAM_KEY secret is not set in GitHub Settings.")
+        print("CRITICAL: YOUTUBE_STREAM_KEY secret is missing!")
         return
 
     while True:
@@ -99,9 +120,12 @@ async def main_loop():
         
         for i, item in enumerate(items):
             video = await generate_assets(item, i)
-            if video: video_segments.append(video)
+            if video:
+                video_segments.append(video)
+                await asyncio.sleep(1) # Small delay to prevent rate limiting
         
         if not video_segments:
+            print("No segments generated. Waiting 60s...")
             await asyncio.sleep(60)
             continue
 
@@ -109,7 +133,7 @@ async def main_loop():
             for v in video_segments:
                 f.write(f"file '{v}'\n")
 
-        print("--- Pushing Stream to YouTube ---")
+        print("--- [STREAMING] Pushing to YouTube ---")
         stream_cmd = [
             'ffmpeg', '-re', '-f', 'concat', '-safe', '0', '-i', 'playlist.txt',
             '-vcodec', 'libx264', '-preset', 'veryfast', '-maxrate', '4500k', 
@@ -119,11 +143,10 @@ async def main_loop():
         ]
         subprocess.run(stream_cmd)
         
-        # Cleanup
         for f in os.listdir():
             if f.endswith((".mp4", ".mp3", ".jpg")):
                 try: os.remove(f)
                 except: pass
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    asyncio.run(broadcast_loop())
