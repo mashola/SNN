@@ -1,0 +1,33 @@
+name: Free Swahili News Stream
+
+on:
+  schedule:
+    # Restarts every 5 hours to stay live 24/7 (GitHub limit is 6h)
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+jobs:
+  broadcast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install feedparser requests edge-tts deep-translator
+
+      - name: Run Broadcast Engine
+        env:
+          YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
+        run: python automation.py
